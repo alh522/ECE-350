@@ -80,6 +80,7 @@ Note: the controller acts on the **heading error**. The **cross-track error** (d
 | `pid_path_new.py` | **The main file.** The controller, the paths, the metrics, the logging, and the batch commands that run whole experiments. It is a BlueSim "behavior" file and must be placed in BlueSim's `fishfood/` folder to run (see Setup). Has a change log at the top |
 | `pid_path.py` | The first version of the controller (kept for reference; `pid_path_new.py` replaces it) |
 | `plot_ticks.py` | Optional helper that plots one or more runs: the robot's path, cross-track error, heading error and turn command over time. Not needed for the numbers; used for figures and for checking what happened in a run |
+| `results/` | The summary CSV of every experiment (`gains`, `part1`, `dfilter`, `tune`, `part2`): the numbers behind every result below |
 | `bluesim/` | Copy of simulator files |
 | `README.md` | This file |
 
@@ -161,9 +162,9 @@ Every setting after `pid_path_new` is optional. A typo in a setting name stops t
 | `kp`, `ki`, `kd` | numbers | PID gains |
 | `kp_p` | number | Gain of the P-only baseline |
 | `alpha` | `0` < alpha <= `1` | Derivative filter. `1.0` = no filter, smaller = smoother but slower to react |
-| `cmin`, `e0` | number, degrees | Part II: lowest speed, and the heading error where slowing down starts |
+| `cmax`, `cmin`, `e0` | number, number, degrees | Part II: speed when lined up with the path, lowest speed, and the heading error where slowing down starts |
 
-Current defaults (chosen by the gain tuning in section 7): `kp=4`, `ki=0.1`, `kd=2`, `kp_p=8`, `alpha=0.3`, `speed=0.25`.
+Current defaults (chosen by the tuning in section 8): `kp=4`, `ki=0.1`, `kd=2`, `kp_p=8`, `alpha=0.3`, `speed=0.25`; adaptive speed `cmax=0.3`, `cmin=0.05`, `e0=10`.
 
 ### 6.2 Whole experiments
 
@@ -173,8 +174,8 @@ These commands run many simulations one after another and collect the results:
 python3 -B fishfood/pid_path_new.py gains     # tune the gains (tuning seeds 101-103 only)
 python3 -B fishfood/pid_path_new.py part1     # Part I: P vs PID, 3 paths x 3 noise levels x 5 seeds = 90 runs
 python3 -B fishfood/pid_path_new.py dfilter   # derivative filter on vs off, 30 runs
-python3 -B fishfood/pid_path_new.py tune      # Part II: tune the adaptive speed rule, 27 runs
-python3 -B fishfood/pid_path_new.py part2     # Part II: fixed speeds vs adaptive speed, 225 runs
+python3 -B fishfood/pid_path_new.py tune      # Part II: tune the adaptive speed rule, 54 runs
+python3 -B fishfood/pid_path_new.py part2     # Part II: 6 fixed speeds vs adaptive, 3 paths x 3 noise x 5 seeds = 315 runs
 ```
 
 Each simulation takes about a second, so even the largest batch finishes in a few minutes.
@@ -198,12 +199,19 @@ This averages the runs that differ only in their seed and prints one line per se
 
 ### 6.4 Plot runs
 
-```bash
-python3 plot_ticks.py logfiles/pidpath_test_zigzag_pid_0.25_none_kp4_kd2_a0.3_s1_ticks.csv
-open logfiles/ticks_plot.png        # macOS; on other systems open the file by hand
-```
+`plot_ticks.py` overlays one or more runs: the robot paths from above with the reference path dashed, plus cross-track error, heading error, turn command and forward-speed command over time. It prints each run's time-weighted RMSE (matching the summary file). `out=` sets the file name inside `logfiles/`.
 
-Give it several ticks files to overlay them (for example a PID run and a P-only run). It saves `logfiles/ticks_plot.png` with four panels (path from above, cross-track error, heading error, turn command) and prints each run's RMSE.
+The two figures used in the slides:
+```bash
+# Part I: P-only vs PID on the zigzag
+python3 plot_ticks.py logfiles/pidpath_part1_zigzag_p_0.25_low_*_s1_ticks.csv \
+                      logfiles/pidpath_part1_zigzag_pid_0.25_low_*_s1_ticks.csv out=part1_zigzag.png
+# Part II: fixed 0.25 and 0.3 vs adaptive on the zigzag
+python3 plot_ticks.py logfiles/pidpath_part2_zigzag_pid_0.25_low_*_s1_ticks.csv \
+                      logfiles/pidpath_part2_zigzag_pid_0.3_low_*_s1_ticks.csv \
+                      logfiles/pidpath_part2_zigzag_pid_adaptive_low_*_s1_ticks.csv out=part2_zigzag.png
+open logfiles/part2_zigzag.png        # macOS; on other systems open the file by hand
+```
 
 BlueSim's own 3D animation also works. Use the time stamp BlueSim prints at the end of a run, **plus `_0`** (the robot number):
 ```bash
@@ -275,7 +283,23 @@ Adding sensor noise *lowered* RMSE (straight path: 97 mm with no noise vs 91 mm 
 
 ### 8.5 Part II: adaptive speed
 
-*In progress.* The `tune` and `part2` experiments test whether slowing down only when the heading error is large gives lower RMSE at equal or better completion time than a fixed speed.
+**The rule.** The forward-speed command is `cmax` while the heading error is below `e0`, then falls in a straight line to `cmin` at 90 degrees. PID keeps steering; the rule only sets speed.
+
+**Tuning (`tune`, zigzag, low noise, tuning seeds).** A first sweep with the top speed fixed at 1.0 failed badly (RMSE 278-622 mm; with `cmin=0.4` the robot never reached the goal): BlueBot has no brakes, so slowing down only after the heading error is already large comes too late at high speed. Making the top speed a setting (`cmax`, change 7) fixed this. Lower top speed always tracked better but finished later; `cmax=0.3, cmin=0.05, e0=10` was the best balance.
+
+**Results (`part2`, 5 new seeds per cell).** Cross-track RMSE and time to finish, zigzag:
+
+| Noise | Fixed 0.25 | Fixed 0.3 | Fixed 0.35 | **Adaptive** |
+|---|---|---|---|---|
+| none | 111.4 mm, 68.1 s | 157.2 mm, 64.5 s | 249.4 mm, 63.3 s | **103.3 mm, 67.6 s** |
+| low | 104.3 mm, 70.0 s | 143.9 mm, 65.0 s | 238.9 mm, 63.6 s | **99.3 mm, 68.9 s** |
+| high | 96.4 mm, 74.8 s | 133.2 mm, 67.6 s | 223.0 mm, 64.4 s | **94.7 mm, 73.0 s** |
+
+Fixed 0.5 and 0.75 never reached the goal on the zigzag; fixed 1.0 reached it only by swinging wide (RMSE about 660 mm).
+
+- **On the zigzag, adaptive beats every fixed speed:** lower RMSE *and* faster than the best fixed speed (0.25) at all three noise levels, with 17-23% lower settled error. This meets the proposal's success test.
+- **On the straight line and the gentle curve it brings nothing:** it behaves like a fixed speed of 0.3 and is slightly worse (about 2 mm) and slightly slower (1-2 s), because it only slows during the start-up recovery.
+- **Conclusion:** slowing down for large heading errors helps exactly where turns are hard, as long as the top speed is modest enough that the robot can still react before a corner.
 
 ---
 
@@ -296,7 +320,8 @@ Adding sensor noise *lowered* RMSE (straight path: 97 mm with no noise vs 91 mm 
 
 - Position and heading come from the simulator's stored state (a perfect sensor plus added noise), not from BlueBot's cameras.
 - One robot, 2D only (the robot stays at the surface).
-- Gains were tuned on one path (zigzag, low noise) and used everywhere.
+- Gains and the adaptive rule were tuned on one path (zigzag, low noise) and used everywhere.
+- The adaptive rule reacts to heading error; it does not look ahead to slow down *before* a corner.
 - The lookahead distance (300 mm) was fixed, not tuned.
 - Tick timing in BlueSim varies by about 10% and is not logged by BlueSim itself; our metrics weight by the measured tick length.
 
@@ -307,7 +332,7 @@ Adding sensor noise *lowered* RMSE (straight path: 97 mm with no noise vs 91 mm 
 As required by the course, AI-generated code is marked in the source with `# AI-GENERATED (...)` and `# END AI-GENERATED` comments, and every substantive use is listed in the paper's AI appendix.
 
 - `pid_path.py` (version 1): generated with Claude Fable (appendix entry 1).
-- `pid_path_new.py`: version 1 plus changes 1-6, written with Claude Opus 5.5 (appendix entry 2). Each change is marked `# [CHANGE n]` ... `# [END CHANGE n]` and described in the change log at the top of the file.
+- `pid_path_new.py`: version 1 plus changes 1-7, written with Claude Opus 5.5 (appendix entry 2). Each change is marked `# [CHANGE n]` ... `# [END CHANGE n]` and described in the change log at the top of the file.
 - `plot_ticks.py`: written with Claude Opus 5.5.
 
 ---
