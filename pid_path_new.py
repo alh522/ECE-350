@@ -11,6 +11,7 @@ make six changes. Each change is marked in the code with "# [CHANGE n]" where it
 starts and "# [END CHANGE n]" where it ends, so you can search for them.
 Changes 1-6 were written by the students (appendix entry 2);
 
+
 [CHANGE 1] Gain tuning, and a separate gain for the P-only baseline
   WHAT: new setting 'kp_p' (the kp used when ctrl=p), new batch "gains" that
         sweeps kp/kd for PID and kp_p for P-only on the tuning seeds, and a
@@ -66,6 +67,24 @@ Changes 1-6 were written by the students (appendix entry 2);
         gains can be chosen as a trade-off between tracking and fin chatter.
   WHERE: Fish.__init__, Fish.move(), Fish.update_metrics(), Fish.write_logs(), report().
 
+[CHANGE 7] Top speed of the adaptive rule is a setting (cmax)
+  WHAT: new setting 'cmax' (caudal command of the adaptive rule when the
+        robot is lined up), replacing the fixed constant ADAPTIVE_CMAX = 1.0.
+        It is written to the summary and the ticks filename, and the "tune"
+        batch now sweeps cmax as well as cmin and e0.
+  WHY:  the first tuning run (cmax fixed at 1.0) gave RMSE 278-622 mm on the
+        zigzag, against 104 mm at a fixed speed of 0.25, and with cmin = 0.4
+        the robot never reached the goal. With cmax = 1.0 the robot enters each
+        corner at full speed; BlueSim has no brakes (only drag slows it), so
+        slowing down only after the heading error is already large comes too
+        late. Capping the top speed lets tuning trade faster straights against
+        corners the robot can still make.
+  WHERE: DEFAULTS, Fish.__init__, Fish.caudal_command(), Fish.write_logs(),
+         batch_tune(), report().
+
+NOTE: the summary CSV has new columns (alpha, settled_rmse_mm, turn_change, cmax). Delete any old
+logfiles/pidpath_*_summary.csv before running version 2, or the columns will
+not line up.
 ==============================================================================
 
 WHAT THIS FILE DOES
@@ -144,8 +163,11 @@ DEFAULTS = {
     # [CHANGE 2] derivative low-pass filter weight. 1.0 = no filter (version 1).
     'alpha': '0.3',
     # [END CHANGE 2]
-    'cmin': '0.2',       # adaptive speed: lowest caudal command
-    'e0': '20',          # adaptive speed: heading error [deg] where slowing begins
+    # [CHANGE 7] top speed of the adaptive rule (was the constant ADAPTIVE_CMAX = 1.0)
+    'cmax': '0.3',       # adaptive speed: caudal command when lined up with the path
+    # [END CHANGE 7]
+    'cmin': '0.05',       # adaptive speed: lowest caudal command
+    'e0': '10',          # adaptive speed: heading error [deg] where slowing begins
 }
 
 # Noise added to the pose the CONTROLLER reads: (position std [mm], heading std [deg]).
@@ -155,7 +177,6 @@ LOOKAHEAD = 300.0          # [mm] how far ahead on the path the robot aims
 GOAL_RADIUS = 150.0        # [mm] the run counts as finished inside this distance
 START_OFFSET = 300.0       # [mm] start this far to the LEFT of the path start
 START_HEADING_OFF = math.radians(20)  # [rad] start heading turned 20 deg left of the path
-ADAPTIVE_CMAX = 1.0        # caudal command of the adaptive rule when well aligned
 ADAPTIVE_E_FULL = math.radians(90)    # [rad] heading error where the slow-down reaches cmin
 INTEGRAL_LIMIT = 1.0       # [rad*s] cap on the stored integral (anti-windup)
 SEARCH_WINDOW = 200.0      # [mm] how far ahead of the last progress we look for the closest
@@ -331,6 +352,7 @@ class Fish():
         # [END CHANGE 2]
         self.adaptive = (SETTINGS['speed'] == 'adaptive')
         self.fixed_caudal = 0.0 if self.adaptive else float(SETTINGS['speed'])
+        self.cmax = float(SETTINGS['cmax'])  # [CHANGE 7]
         self.cmin = float(SETTINGS['cmin'])
         self.e0 = math.radians(float(SETTINGS['e0']))
         self.noise_pos, noise_deg = NOISE_LEVELS[SETTINGS['noise']]
@@ -433,11 +455,13 @@ class Fish():
         if not self.adaptive:
             return self.fixed_caudal
         size = abs(error)
+        # [CHANGE 7] self.cmax replaces the constant ADAPTIVE_CMAX
         if size <= self.e0:
-            return ADAPTIVE_CMAX
-        # straight line from CMAX at e0 down to cmin at 90 deg, then flat at cmin
+            return self.cmax
+        # straight line from cmax at e0 down to cmin at 90 deg, then flat at cmin
         fraction = min(1.0, (size - self.e0) / (ADAPTIVE_E_FULL - self.e0))
-        return ADAPTIVE_CMAX - fraction * (ADAPTIVE_CMAX - self.cmin)
+        return self.cmax - fraction * (self.cmax - self.cmin)
+        # [END CHANGE 7]
 
     def move(self, duration):
         """One control tick: sense, decide, command the fins, integrate the dynamics."""
@@ -473,7 +497,7 @@ class Fish():
             self.update_metrics(cte, caudal, duration, pect_l - pect_r)  # [CHANGE 6] turn passed in
 
         # dorsal = 0: buoyancy keeps the robot at the surface (z = 0), so the task is 2D.
-        # Checked dynamics.py line 41: update_ctrl(dorsal, caudal, pect_r, pect_l), order matches. (Refia)
+        # TODO (Refia): confirm the argument order in dynamics.update_ctrl().
         self.dynamics.update_ctrl(0.0, caudal, pect_r, pect_l)
         self.rows.append([self.t, x, y, z, phi, cte, error, caudal, pect_l, pect_r, int(self.reached)])
         return self.dynamics.simulate_move(self.id, duration)
@@ -520,24 +544,24 @@ class Fish():
         run_name = 'pidpath_{}_{}_{}_{}_{}_kp{:g}_kd{:g}_a{:g}'.format(
             s['tag'], s['path'], s['ctrl'], s['speed'], s['noise'], self.kp, self.kd, self.alpha)
         if self.adaptive:
-            run_name += '_cmin{}_e0{}'.format(s['cmin'], s['e0'])
+            run_name += '_cmax{}_cmin{}_e0{}'.format(s['cmax'], s['cmin'], s['e0'])  # [CHANGE 7] cmax added
         run_name += '_s{}'.format(s['seed'])
         # [END CHANGE 5]
         np.savetxt('logfiles/' + run_name + '_ticks.csv', np.array(self.rows), fmt='%.4f', delimiter=',',
                    header='t_s,x_mm,y_mm,z_mm,phi_rad,cross_track_mm,heading_error_rad,'
                           'caudal,pect_l,pect_r,reached', comments='')
 
-        # [CHANGE 2, 3, 4, 6] alpha, settled_rmse_mm and turn_change added to the summary
-        header = ('timestamp,tag,path,ctrl,speed,noise,seed,kp,ki,kd,alpha,cmin,e0_deg,lookahead_mm,'
+        # [CHANGE 2, 3, 4, 6, 7] alpha, settled_rmse_mm, turn_change and cmax added to the summary
+        header = ('timestamp,tag,path,ctrl,speed,noise,seed,kp,ki,kd,alpha,cmax,cmin,e0_deg,lookahead_mm,'
                   'reached,completion_time_s,rmse_mm,settled_rmse_mm,max_cte_mm,path_crossings,'
                   'mean_caudal,turn_change,min_goal_dist_mm,max_abs_z_mm,ticks_file')
         values = [time.strftime('%Y-%m-%d %H:%M:%S'), s['tag'], s['path'], s['ctrl'], s['speed'],
-                  s['noise'], s['seed'], self.kp, self.ki, self.kd, self.alpha, self.cmin, s['e0'],
+                  s['noise'], s['seed'], self.kp, self.ki, self.kd, self.alpha, self.cmax, self.cmin, s['e0'],
                   LOOKAHEAD, int(self.reached), round(self.completion_time, 2), round(rmse, 2),
                   round(settled_rmse, 2), round(self.max_cte, 2), self.crossings,
                   round(mean_caudal, 3), round(turn_change, 3), round(self.min_goal_dist, 1), round(self.max_abs_z, 3),
                   run_name + '_ticks.csv']
-        # [END CHANGE 2, 3, 4, 6]
+        # [END CHANGE 2, 3, 4, 6, 7]
         summary_file = 'logfiles/pidpath_{}_summary.csv'.format(s['tag'])
         is_new = not os.path.exists(summary_file)
         with open(summary_file, 'a') as f:
@@ -628,19 +652,26 @@ def batch_dfilter():
 def batch_part2():
     """Part II: PID at 4 fixed speeds vs adaptive speed. 3 paths x 5 speeds x 3 noise x 5 seeds = 225 runs."""
     for path in PATHS:
-        for speed in [0.25, 0.5, 0.75, 1.0, 'adaptive']:
+        for speed in [0.25, 0.3, 0.35, 0.5, 0.75, 1.0, 'adaptive']:
             for noise in NOISES:
                 for seed in REPORT_SEEDS:
                     run_one('part2', path, 'pid', speed, noise, seed)
 
 
 def batch_tune():
-    """Tune the adaptive rule on the corner path with TUNE_SEEDS. 3 x 3 x 3 seeds = 27 runs."""
-    for cmin in [0.1, 0.2, 0.4]:
-        for e0 in [10, 20, 40]:
-            for seed in TUNE_SEEDS:
-                run_one('tune', 'zigzag', 'pid', 'adaptive', 'low', seed,
-                        extra=['cmin=' + str(cmin), 'e0=' + str(e0)])
+    """Tune the adaptive rule on the corner path with TUNE_SEEDS.
+
+    [CHANGE 7] cmax is swept too: 3 cmax x 3 cmin x 2 e0 x 3 seeds = 54 runs.
+    (A first sweep with cmax fixed at 1.0, cmin 0.1/0.2/0.4 and e0 10/20/40
+    showed lower cmin always better, e0 barely mattering, and cmin = 0.4
+    never reaching the goal, so the grid was moved accordingly.)
+    """
+    for cmax in [0.35, 0.5, 0.75]:
+        for cmin in [0.05, 0.1, 0.2]:
+            for e0 in [10, 20]:
+                for seed in TUNE_SEEDS:
+                    run_one('tune', 'zigzag', 'pid', 'adaptive', 'low', seed,
+                            extra=['cmax=' + str(cmax), 'cmin=' + str(cmin), 'e0=' + str(e0)])
 
 
 # [CHANGE 1] average a summary file per setting, best (lowest RMSE) first.
@@ -659,7 +690,7 @@ def report(tag):
         sys.exit()
     with open(filename) as f:
         rows = list(csv.DictReader(f))
-    keys = ['path', 'ctrl', 'speed', 'noise', 'kp', 'ki', 'kd', 'alpha', 'cmin', 'e0_deg']
+    keys = ['path', 'ctrl', 'speed', 'noise', 'kp', 'ki', 'kd', 'alpha', 'cmax', 'cmin', 'e0_deg']  # [CHANGE 7] cmax
     groups = {}
     for row in rows:
         groups.setdefault(tuple(row.get(k, '') for k in keys), []).append(row)
@@ -697,5 +728,6 @@ if __name__ == '__main__':
         print('Usage (from the repo root): python -B fishfood/pid_path.py '
               'gains|part1|dfilter|tune|part2   or   report <tag>')
         sys.exit()
+
 # END AI-GENERATED (version 1: Claude Fable) 
-# END CHANGES 1-6: Original made by students 
+# END CHANGES 1-7
