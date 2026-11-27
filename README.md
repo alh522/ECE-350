@@ -332,7 +332,6 @@ Fixed 0.5 and 0.75 never reached the goal on the zigzag; fixed 1.0 reached it on
 As required by the course, AI-generated code is marked in the source with `# AI-GENERATED (...)` and `# END AI-GENERATED` comments, and every substantive use is listed in the paper's AI appendix.
 
 - `pid_path.py` (version 1): generated with Claude Fable (appendix entry 1).
-- `pid_path_new.py`: version 1 plus changes 1-7, written with Claude Opus 5.5 (appendix entry 2). Each change is marked `# [CHANGE n]` ... `# [END CHANGE n]` and described in the change log at the top of the file.
 - `plot_ticks.py`: written with Claude Opus 5.5.
 
 ---
